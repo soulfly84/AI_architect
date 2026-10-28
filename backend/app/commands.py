@@ -16,6 +16,7 @@ import os
 import re
 from typing import Any
 
+from . import moves
 from .models import Project
 
 SCHEMA_HELP = """Ты — движок правок планировки. Получаешь описание проекта и команду.
@@ -228,6 +229,11 @@ def parse_rules(command: str, project: Project) -> dict[str, Any]:
             ops.append({"op": "room_label", "room_id": rid,
                         "text": room.name if room else None,
                         "color": "#ffffff", "visible": True})
+
+    # 7. Сдвиг к стене, поворот, убрать стул (см. moves.py)
+    move_ops, move_clar = moves.parse_moves(low, project, _clauses(low, project))
+    ops.extend(move_ops)
+    clar.extend(move_clar)
 
     return {"operations": ops, "clarifications": clar, "engine": "rules"}
 

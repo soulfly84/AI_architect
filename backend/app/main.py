@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
-from . import commands, export, geometry, render2d, storage
+from . import commands, export, geometry, moves, render2d, storage
 from .models import Project
 
 app = FastAPI(title="Interior AI", version="0.1.0",
@@ -83,6 +83,13 @@ def _apply_ops(project: Project, ops: list[dict]) -> tuple[list[str], list[str]]
                 summary += geometry.set_room_label(
                     project, op["room_id"], op.get("text"),
                     op.get("color", "#ffffff"), op.get("visible", True))
+            elif name == "move_to_wall":
+                summary += moves.move_to_wall(project, op["item_id"], op["side"])
+            elif name == "rotate":
+                summary += moves.rotate(project, op["item_id"],
+                                        float(op.get("degrees", 90)))
+            elif name == "remove_chair":
+                summary += moves.remove_chair(project, op["table_id"])
             else:
                 warnings.append(f"Неизвестная операция: {name}")
         except (KeyError, TypeError) as exc:
