@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interior AI — MVP</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2b3140;
+    --text:#e8ecf2; --muted:#8b95a7; --accent:#2ec4b6; --warn:#f0a52a;
+    --err:#e5484d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 Inter,-apple-system,Segoe UI,Roboto,sans-serif;
+       background:var(--bg);color:var(--text);height:100vh;display:flex;
+       flex-direction:column}
+  header{display:flex;align-items:center;gap:16px;padding:12px 20px;
+         border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .badge{font-size:11px;color:var(--muted);
+                border:1px solid var(--line);padding:2px 8px;border-radius:99px}
+  main{flex:1;display:grid;grid-template-columns:1fr 420px;min-height:0}
+  #canvas{overflow:auto;display:flex;align-items:center;justify-content:center;
+          background:#f7f5f2;padding:16px}
+  #canvas svg{max-width:100%;height:auto;box-shadow:0 8px 30px #0002;
+              border-radius:6px}
+  aside{border-left:1px solid var(--line);background:var(--panel);
+        display:flex;flex-direction:column;min-height:0}
+  .block{padding:14px 16px;border-bottom:1px solid var(--line)}
+  .block h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;
+            color:var(--muted);margin:0 0 10px;font-weight:600}
+  textarea{width:100%;min-height:88px;resize:vertical;background:var(--panel2);
+           color:var(--text);border:1px solid var(--line);border-radius:8px;
+           padding:10px;font:inherit}
+  textarea:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#08201d;border:0;border-radius:8px;
+         padding:9px 14px;font-weight:600;cursor:pointer;font-family:inherit}
+  button:hover{filter:brightness(1.08)}
+  button.ghost{background:transparent;color:var(--text);
+               border:1px solid var(--line)}
+  button.small{padding:5px 10px;font-size:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  #log{flex:1;overflow:auto;padding:12px 16px;font-size:13px}
+  .msg{padding:8px 10px;border-radius:8px;margin-bottom:8px;
+       background:var(--panel2);border-left:3px solid var(--line)}
+  .msg.ok{border-left-color:var(--accent)}
+  .msg.warn{border-left-color:var(--warn)}
+  .msg.err{border-left-color:var(--err)}
+  .msg .t{color:var(--muted);font-size:11px;margin-bottom:2px}
+  #revs{max-height:180px;overflow:auto}
+  .rev{display:flex;justify-content:space-between;gap:8px;align-items:center;
+       padding:6px 0;border-bottom:1px dashed var(--line);font-size:12px}
+  .rev span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;
+            white-space:nowrap;max-width:260px}
+  .muted{color:var(--muted)}
+  a{color:var(--accent)}
+  @media(max-width:900px){
+    main{grid-template-columns:1fr;grid-template-rows:1fr auto}
+    aside{border-left:0;border-top:1px solid var(--line)}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Interior AI</h1>
+  <span class="badge" id="engine">движок: правила</span>
+  <span class="badge" id="pname">—</span>
+  <div class="row" style="margin-left:auto">
+    <a class="small" id="dxf" href="#">DXF</a>
+    <a class="small" id="obj" href="#">3D (OBJ)</a>
+    <button class="ghost small" onclick="loadProject()">Обновить</button>
+  </div>
+</header>
+
+<main>
+  <div id="canvas"><div class="muted">загрузка плана…</div></div>
+  <aside>
+    <div class="block">
+      <h2>Команда</h2>
+      <textarea id="cmd" placeholder="Например: диван в гостиной бирюзовый, стол больше чтобы поместились по 4 стула с каждой стороны, стена к террасе панорамная в пол, полки в сауне слева, подпиши помещения белым кроме туалета"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button onclick="runCmd(true)">Применить</button>
+        <button class="ghost" onclick="runCmd(false)">Только разобрать</button>
+      </div>
+    </div>
+    <div class="block">
+      <h2>История версий</h2>
+      <div id="revs" class="muted">пока нет правок</div>
+    </div>
+    <div id="log"><div class="msg"><div class="t">готово</div>
+      Опишите правку текстом — изменения применятся к модели,
+      а не к картинке.</div></div>
+  </aside>
+</main>
+
+<script>
+let PROJECT = null;
+const $ = s => document.querySelector(s);
+
+function log(kind, title, body){
+  const d = document.createElement('div');
+  d.className = 'msg ' + kind;
+  d.innerHTML = `<div class="t">${title}</div>${body}`;
+  $('#log').prepend(d);
+}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function boot(){
+  const list = await api('/api/projects');
+  if(!list.length){
+    $('#canvas').innerHTML =
+      '<div class="muted">Нет проектов. Запустите <code>python -m app.seed</code></div>';
+    return;
+  }
+  PROJECT = list[0].project_id;
+  $('#pname').textContent = list[0].name;
+  $('#dxf').href = `/api/projects/${PROJECT}/export.dxf`;
+  $('#obj').href = `/api/projects/${PROJECT}/model.obj`;
+  const h = await api('/api/health');
+  $('#engine').textContent = 'движок: ' +
+    (h.llm_enabled ? 'LLM + правила' : 'правила');
+  await draw();
+  await loadRevs();
+}
+
+async function draw(){
+  const svg = await (await fetch(`/api/projects/${PROJECT}/plan.svg`,
+                                 {method:'POST'})).text();
+  $('#canvas').innerHTML = svg;
+}
+
+async function runCmd(apply){
+  const text = $('#cmd').value.trim();
+  if(!text) return;
+  try{
+    const res = await api(`/api/projects/${PROJECT}/command`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text, apply})
+    });
+    if(!apply){
+      log('', 'разбор',
+        `<pre style="white-space:pre-wrap;margin:0">${
+          JSON.stringify(res.parsed, null, 2)}</pre>`);
+      return;
+    }
+    const lines = [...(res.summary||[])];
+    if(res.changes?.length)
+      lines.push(`<span class="muted">изменено объектов: ${
+        res.changes.length}</span>`);
+    log('ok', 'применено', lines.join('<br>') || 'без изменений');
+    (res.warnings||[]).forEach(w => log('warn', 'внимание', w));
+    (res.clarifications||[]).forEach(c => log('warn', 'уточнение', c));
+    if(res.validation?.errors?.length)
+      log('err', 'ошибки геометрии', res.validation.errors.join('<br>'));
+    await loadRevs();
+    await draw();
+  }catch(e){ log('err', 'ошибка', e.message); }
+}
+
+async function loadRevs(){
+  const revs = await api(`/api/projects/${PROJECT}/revisions`);
+  const box = $('#revs');
+  if(!revs.length){
+    box.innerHTML = '<span class="muted">пока нет правок</span>';
+    return;
+  }
+  box.innerHTML = revs.slice().reverse().map(r => `
+    <div class="rev">
+      <span title="${r.command}">${r.command || 'правка'}</span>
+      <button class="ghost small" onclick="revert('${r.id}')">Отменить</button>
+    </div>`).join('');
+}
+
+async function revert(id){
+  try{
+    await api(`/api/projects/${PROJECT}/revert/${id}`, {method:'POST'});
+    log('ok', 'откат', 'восстановлено состояние до этой правки');
+    await loadRevs(); await draw();
+  }catch(e){ log('err', 'ошибка', e.message); }
+}
+
+async function loadProject(){ await draw(); await loadRevs(); }
+boot();
+</script>
+</body>
+</html>
