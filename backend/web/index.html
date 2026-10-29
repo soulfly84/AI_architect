@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Interior AI — MVP</title>
+<title>Interior AI — планы и 3D</title>
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2b3140;
@@ -13,89 +13,166 @@
   *{box-sizing:border-box}
   body{margin:0;font:14px/1.5 Inter,-apple-system,Segoe UI,Roboto,sans-serif;
        background:var(--bg);color:var(--text);height:100vh;display:flex;
-       flex-direction:column}
-  header{display:flex;align-items:center;gap:16px;padding:12px 20px;
-         border-bottom:1px solid var(--line);background:var(--panel)}
-  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
-  header .badge{font-size:11px;color:var(--muted);
-                border:1px solid var(--line);padding:2px 8px;border-radius:99px}
-  main{flex:1;display:grid;grid-template-columns:1fr 420px;min-height:0}
-  #canvas{overflow:auto;display:flex;align-items:center;justify-content:center;
-          background:#f7f5f2;padding:16px}
-  #canvas svg{max-width:100%;height:auto;box-shadow:0 8px 30px #0002;
-              border-radius:6px}
+       flex-direction:column;overflow:hidden}
+  header{display:flex;align-items:center;gap:12px;padding:10px 16px;
+         border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:600}
+  header .badge{font-size:11px;color:var(--muted);border:1px solid var(--line);
+                padding:2px 8px;border-radius:99px}
+  main{flex:1;display:grid;grid-template-columns:1fr 380px;min-height:0}
+  #stage{position:relative;background:#f7f5f2;min-height:0;overflow:hidden}
+  #stage svg{width:100%;height:100%;display:block;touch-action:none}
+  #three{position:absolute;inset:0;display:none;background:#0f1115}
+  #three canvas{display:block}
   aside{border-left:1px solid var(--line);background:var(--panel);
-        display:flex;flex-direction:column;min-height:0}
-  .block{padding:14px 16px;border-bottom:1px solid var(--line)}
-  .block h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;
-            color:var(--muted);margin:0 0 10px;font-weight:600}
-  textarea{width:100%;min-height:88px;resize:vertical;background:var(--panel2);
+        display:flex;flex-direction:column;min-height:0;overflow:auto}
+  .block{padding:12px 14px;border-bottom:1px solid var(--line)}
+  .block h2{font-size:11px;text-transform:uppercase;letter-spacing:.8px;
+            color:var(--muted);margin:0 0 8px;font-weight:600}
+  textarea{width:100%;min-height:64px;resize:vertical;background:var(--panel2);
            color:var(--text);border:1px solid var(--line);border-radius:8px;
-           padding:10px;font:inherit}
+           padding:8px;font:inherit}
   textarea:focus{outline:none;border-color:var(--accent)}
+  input[type=text],input[type=number],input[type=file]{background:var(--panel2);
+    color:var(--text);border:1px solid var(--line);border-radius:8px;
+    padding:7px 9px;font:inherit;width:100%}
   button{background:var(--accent);color:#08201d;border:0;border-radius:8px;
-         padding:9px 14px;font-weight:600;cursor:pointer;font-family:inherit}
+         padding:8px 12px;font-weight:600;cursor:pointer;font-family:inherit}
   button:hover{filter:brightness(1.08)}
-  button.ghost{background:transparent;color:var(--text);
-               border:1px solid var(--line)}
-  button.small{padding:5px 10px;font-size:12px}
-  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  #log{flex:1;overflow:auto;padding:12px 16px;font-size:13px}
-  .msg{padding:8px 10px;border-radius:8px;margin-bottom:8px;
-       background:var(--panel2);border-left:3px solid var(--line)}
+  button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+  button.small{padding:4px 9px;font-size:12px}
+  button.danger{background:transparent;color:var(--err);border:1px solid var(--err)}
+  .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .palette{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  .palette button{padding:7px 4px;font-size:11px;font-weight:500;
+                  background:var(--panel2);color:var(--text);
+                  border:1px solid var(--line)}
+  .palette button:hover{border-color:var(--accent)}
+  #log{flex:1;overflow:auto;padding:10px 14px;font-size:12px;min-height:100px}
+  .msg{padding:6px 8px;border-radius:7px;margin-bottom:6px;background:var(--panel2);
+       border-left:3px solid var(--line)}
   .msg.ok{border-left-color:var(--accent)}
   .msg.warn{border-left-color:var(--warn)}
   .msg.err{border-left-color:var(--err)}
-  .msg .t{color:var(--muted);font-size:11px;margin-bottom:2px}
-  #revs{max-height:180px;overflow:auto}
-  .rev{display:flex;justify-content:space-between;gap:8px;align-items:center;
-       padding:6px 0;border-bottom:1px dashed var(--line);font-size:12px}
-  .rev span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;
-            white-space:nowrap;max-width:260px}
+  .msg .t{color:var(--muted);font-size:10px;text-transform:uppercase;
+          letter-spacing:.5px;margin-bottom:2px}
   .muted{color:var(--muted)}
-  a{color:var(--accent)}
+  .rev{display:flex;justify-content:space-between;gap:6px;align-items:center;
+       padding:4px 0;border-bottom:1px dashed var(--line);font-size:11px}
+  .rev span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;
+            white-space:nowrap;max-width:210px}
+  #revs{max-height:120px;overflow:auto}
+  .tabs{display:flex;gap:4px;margin-left:auto}
+  .tabs button{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+  .tabs button.on{background:var(--accent);color:#08201d;border-color:var(--accent)}
+  #drop{position:absolute;inset:0;display:flex;align-items:center;
+        justify-content:center;background:#f7f5f2cc;backdrop-filter:blur(2px);
+        font-size:15px;color:#333;cursor:pointer;z-index:5}
+  #drop.hide{display:none}
+  #drop .inner{border:2px dashed #b9b2a6;border-radius:14px;padding:36px 54px;
+               text-align:center;background:#fff8}
   @media(max-width:900px){
-    main{grid-template-columns:1fr;grid-template-rows:1fr auto}
+    main{grid-template-columns:1fr;grid-template-rows:1fr 45%}
     aside{border-left:0;border-top:1px solid var(--line)}
   }
 </style>
+<script type="importmap">
+{"imports":{"three":"/static/three.module.js"}}
+</script>
 </head>
 <body>
 <header>
   <h1>Interior AI</h1>
-  <span class="badge" id="engine">движок: правила</span>
   <span class="badge" id="pname">—</span>
-  <div class="row" style="margin-left:auto">
-    <a class="small" id="dxf" href="#">DXF</a>
-    <a class="small" id="obj" href="#">3D (OBJ)</a>
-    <button class="ghost small" onclick="loadProject()">Обновить</button>
+  <span class="badge" id="badgeRooms">—</span>
+  <div class="tabs">
+    <button id="tab2d" class="on" onclick="setView('2d')">План</button>
+    <button id="tab3d" onclick="setView('3d')">3D</button>
+  </div>
+  <div class="row">
+    <a class="small muted" id="dxf" href="#">DXF</a>
+    <a class="small muted" id="obj" href="#">OBJ</a>
+    <button class="ghost small" onclick="reloadAll()">Обновить</button>
   </div>
 </header>
 
 <main>
-  <div id="canvas"><div class="muted">загрузка плана…</div></div>
-  <aside>
-    <div class="block">
-      <h2>Команда</h2>
-      <textarea id="cmd" placeholder="Например: диван в гостиной бирюзовый, стол больше чтобы поместились по 4 стула с каждой стороны, стена к террасе панорамная в пол, полки в сауне слева, подпиши помещения белым кроме туалета"></textarea>
-      <div class="row" style="margin-top:8px">
-        <button onclick="runCmd(true)">Применить</button>
-        <button class="ghost" onclick="runCmd(false)">Только разобрать</button>
+  <div id="stage">
+    <div id="drop" onclick="pickFile()">
+      <div class="inner">
+        <b>Загрузите план квартиры</b><br>
+        <span class="muted">PNG, JPG, WEBP или PDF — перетащите файл сюда<br>
+        или нажмите, чтобы выбрать</span>
       </div>
     </div>
+    <div id="three"></div>
+  </div>
+
+  <aside>
     <div class="block">
-      <h2>История версий</h2>
+      <h2>План</h2>
+      <div class="row" style="margin-bottom:6px">
+        <button class="ghost small" onclick="pickFile()">Загрузить план</button>
+        <input type="number" id="planWidth" placeholder="ширина, м" step="0.1"
+               style="width:110px" title="Реальная ширина плана: нужна для масштаба">
+      </div>
+      <div class="muted" style="font-size:11px">
+        Ширина нужна для масштаба. Без неё план считается 10 м в ширину —
+        геометрия верная, размеры условные.
+      </div>
+      <input type="file" id="file" accept="image/*,.pdf" style="display:none"
+             onchange="uploadFile(this.files[0])">
+    </div>
+
+    <div class="block">
+      <h2>Мебель — нажмите, чтобы добавить</h2>
+      <div class="palette" id="palette"></div>
+    </div>
+
+    <div class="block">
+      <h2>Выбранный предмет</h2>
+      <div id="selInfo" class="muted" style="font-size:12px;margin-bottom:6px">
+        ничего не выбрано
+      </div>
+      <div class="row">
+        <button class="ghost small" onclick="rotateSel()">Повернуть 90°</button>
+        <button class="ghost small" onclick="deleteSel()">Удалить</button>
+      </div>
+    </div>
+
+    <div class="block">
+      <h2>Команда текстом</h2>
+      <textarea id="cmd" placeholder="например: стол в гостиной сдвинь к левой стене"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button onclick="runCmd(true)">Применить</button>
+        <button class="ghost" onclick="runCmd(false)">Разобрать</button>
+      </div>
+    </div>
+
+    <div class="block">
+      <h2>История</h2>
       <div id="revs" class="muted">пока нет правок</div>
     </div>
-    <div id="log"><div class="msg"><div class="t">готово</div>
-      Опишите правку текстом — изменения применятся к модели,
-      а не к картинке.</div></div>
+
+    <div id="log"></div>
   </aside>
 </main>
 
-<script>
-let PROJECT = null;
+<script type="module">
+let PROJECT = null, SCENE = null, SELECTED = null, VIEW = '2d';
+let three = null, threeState = null;
 const $ = s => document.querySelector(s);
+
+const PALETTE = [
+  ['sofa','Диван'],['table','Стол'],['chair','Стул'],['bed','Кровать'],
+  ['wardrobe','Шкаф'],['kitchen','Кухня'],['bench','Скамья'],['tv','ТВ'],
+  ['wc','Унитаз'],['shower','Душ'],['fridge','Холодильник'],['stove','Печь'],
+];
+const SIZES = {
+  sofa:[2.2,0.9], table:[1.6,0.9], chair:[0.45,0.45], bed:[1.6,2.0],
+  wardrobe:[0.6,1.8], kitchen:[0.65,2.8], bench:[0.6,2.0], tv:[0.12,1.4],
+  wc:[0.4,0.6], shower:[1.0,1.0], fridge:[0.65,0.7], stove:[0.45,0.45],
+};
 
 function log(kind, title, body){
   const d = document.createElement('div');
@@ -106,86 +183,465 @@ function log(kind, title, body){
 
 async function api(path, opts){
   const r = await fetch(path, opts);
-  if(!r.ok) throw new Error(await r.text());
+  if(!r.ok){
+    let m = await r.text();
+    try { m = JSON.parse(m).detail || m; } catch(e){}
+    throw new Error(m);
+  }
   return r.json();
 }
 
-async function boot(){
-  const list = await api('/api/projects');
-  if(!list.length){
-    $('#canvas').innerHTML =
-      '<div class="muted">Нет проектов. Запустите <code>python -m app.seed</code></div>';
-    return;
+/* ---------------- загрузка плана ---------------- */
+
+function pickFile(){ $('#file').click(); }
+
+async function uploadFile(file){
+  if(!file) return;
+  const w = parseFloat($('#planWidth').value);
+  const fd = new FormData();
+  fd.append('file', file);
+  const q = new URLSearchParams();
+  if(w > 1) q.set('plan_width_m', w);
+  log('', 'план', `распознаю «${file.name}»…`);
+  try{
+    let res;
+    if(PROJECT){
+      res = await api(`/api/projects/${PROJECT}/upload?${q}`, {method:'POST', body:fd});
+      log('ok', 'план загружен',
+        `стен: ${res.report.walls}, помещений: ${res.report.rooms}, дверей: ${res.report.doors}`);
+      (res.report.warnings||[]).forEach(x => log('warn', 'замечание', x));
+      await reloadAll();
+    }else{
+      q.set('name', file.name.replace(/\.[^.]+$/, ''));
+      res = await api(`/api/upload-plan?${q}`, {method:'POST', body:fd});
+      PROJECT = res.project_id;
+      log('ok', 'план распознан',
+        `стен: ${res.report.walls}, помещений: ${res.report.rooms}, дверей: ${res.report.doors}`);
+      (res.report.warnings||[]).forEach(x => log('warn', 'замечание', x));
+      await reloadAll();
+    }
+    $('#drop').classList.add('hide');
+  }catch(e){
+    log('err', 'ошибка распознавания', String(e.message||e));
   }
-  PROJECT = list[0].project_id;
-  $('#pname').textContent = list[0].name;
+}
+
+/* ---------------- загрузка состояния ---------------- */
+
+async function reloadAll(){
+  const list = await api('/api/projects');
+  if(!list.length){ $('#drop').classList.remove('hide'); return; }
+  if(!PROJECT || !list.some(p => p.project_id === PROJECT)) PROJECT = list[0].project_id;
+  const data = await api(`/api/projects/${PROJECT}/scene`);
+  SCENE = data.scene;
+  $('#pname').textContent = data.meta.name || 'проект';
+  $('#badgeRooms').textContent = `${SCENE.rooms.length} пом. · ${SCENE.furniture.length} предм.`;
   $('#dxf').href = `/api/projects/${PROJECT}/export.dxf`;
   $('#obj').href = `/api/projects/${PROJECT}/model.obj`;
-  const h = await api('/api/health');
-  $('#engine').textContent = 'движок: ' +
-    (h.llm_enabled ? 'LLM + правила' : 'правила');
-  await draw();
+  render2d();
+  if(VIEW === '3d') render3d();
   await loadRevs();
-}
-
-async function draw(){
-  const svg = await (await fetch(`/api/projects/${PROJECT}/plan.svg`,
-                                 {method:'POST'})).text();
-  $('#canvas').innerHTML = svg;
-}
-
-async function runCmd(apply){
-  const text = $('#cmd').value.trim();
-  if(!text) return;
-  try{
-    const res = await api(`/api/projects/${PROJECT}/command`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({text, apply})
-    });
-    if(!apply){
-      log('', 'разбор',
-        `<pre style="white-space:pre-wrap;margin:0">${
-          JSON.stringify(res.parsed, null, 2)}</pre>`);
-      return;
-    }
-    const lines = [...(res.summary||[])];
-    if(res.changes?.length)
-      lines.push(`<span class="muted">изменено объектов: ${
-        res.changes.length}</span>`);
-    log('ok', 'применено', lines.join('<br>') || 'без изменений');
-    (res.warnings||[]).forEach(w => log('warn', 'внимание', w));
-    (res.clarifications||[]).forEach(c => log('warn', 'уточнение', c));
-    if(res.validation?.errors?.length)
-      log('err', 'ошибки геометрии', res.validation.errors.join('<br>'));
-    await loadRevs();
-    await draw();
-  }catch(e){ log('err', 'ошибка', e.message); }
+  if(!SCENE.rooms.length) $('#drop').classList.remove('hide');
 }
 
 async function loadRevs(){
-  const revs = await api(`/api/projects/${PROJECT}/revisions`);
-  const box = $('#revs');
-  if(!revs.length){
-    box.innerHTML = '<span class="muted">пока нет правок</span>';
-    return;
+  try{
+    const revs = await api(`/api/projects/${PROJECT}/revisions`);
+    const box = $('#revs');
+    if(!revs.length){ box.innerHTML = '<span class="muted">пока нет правок</span>'; return; }
+    box.innerHTML = revs.slice(-6).reverse().map(r => `
+      <div class="rev"><span title="${esc(r.command)}">${esc(r.command)||'правка'}</span>
+      <button class="ghost small" onclick="revert('${r.id}')">↺</button></div>`).join('');
+  }catch(e){}
+}
+
+function esc(s){ return String(s??'').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* ---------------- 2D ---------------- */
+
+function bounds(){
+  let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  const acc = (x,y) => { x0=Math.min(x0,x); y0=Math.min(y0,y);
+                         x1=Math.max(x1,x); y1=Math.max(y1,y); };
+  for(const r of SCENE.rooms) for(const p of r.vertices) acc(p[0], p[2]);
+  for(const w of SCENE.walls){ acc(w.start[0],w.start[1]); acc(w.end[0],w.end[1]); }
+  for(const f of SCENE.furniture){
+    const hw=f.width/2, hd=f.depth/2;
+    acc(f.center[0]-hw, f.center[1]-hd); acc(f.center[0]+hw, f.center[1]+hd);
   }
-  box.innerHTML = revs.slice().reverse().map(r => `
-    <div class="rev">
-      <span title="${r.command}">${r.command || 'правка'}</span>
-      <button class="ghost small" onclick="revert('${r.id}')">Отменить</button>
-    </div>`).join('');
+  if(x0 > x1) return {x0:0,y0:0,x1:10,y1:10};
+  const pad = 0.6;
+  return {x0:x0-pad, y0:y0-pad, x1:x1+pad, y1:y1+pad};
+}
+
+function render2d(){
+  const stage = $('#stage');
+  stage.querySelectorAll('svg').forEach(n => n.remove());
+  if(!SCENE) return;
+  const b = bounds();
+  const W = b.x1-b.x0, H = b.y1-b.y0;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox', `${b.x0} ${b.y0} ${W} ${H}`);
+  svg.setAttribute('preserveAspectRatio','xMidYMid meet');
+  svg.dataset.w = W;
+
+  // помещения
+  for(const r of SCENE.rooms){
+    const pts = r.vertices.map(v => `${v[0]},${v[2]}`).join(' ');
+    const poly = document.createElementNS(svg.namespaceURI,'polygon');
+    poly.setAttribute('points', pts);
+    poly.setAttribute('fill','#e9e4dc');
+    poly.setAttribute('stroke','none');
+    svg.appendChild(poly);
+    const t = document.createElementNS(svg.namespaceURI,'text');
+    t.setAttribute('x', r.label[0]); t.setAttribute('y', r.label[1]);
+    t.setAttribute('text-anchor','middle');
+    t.setAttribute('font-size', Math.max(0.25, W/60));
+    t.setAttribute('fill','#8d8578');
+    t.textContent = r.name;
+    svg.appendChild(t);
+  }
+
+  // стены
+  for(const w of SCENE.walls){
+    const line = document.createElementNS(svg.namespaceURI,'line');
+    line.setAttribute('x1',w.start[0]); line.setAttribute('y1',w.start[1]);
+    line.setAttribute('x2',w.end[0]);   line.setAttribute('y2',w.end[1]);
+    line.setAttribute('stroke', w.kind==='glass' ? '#7ec8e3' : '#5b5b5b');
+    line.setAttribute('stroke-width', Math.max(0.08, w.thickness));
+    line.setAttribute('stroke-linecap','butt');
+    svg.appendChild(line);
+  }
+
+  // двери
+  for(const d of SCENE.doors){
+    const g = document.createElementNS(svg.namespaceURI,'g');
+    const a = d.angle * Math.PI/180;
+    const x1 = d.center[0] - Math.cos(a)*d.width/2;
+    const y1 = d.center[1] - Math.sin(a)*d.width/2;
+    const x2 = d.center[0] + Math.cos(a)*d.width/2;
+    const y2 = d.center[1] + Math.sin(a)*d.width/2;
+    const l = document.createElementNS(svg.namespaceURI,'line');
+    l.setAttribute('x1',x1); l.setAttribute('y1',y1);
+    l.setAttribute('x2',x2); l.setAttribute('y2',y2);
+    l.setAttribute('stroke','#f7f5f2'); l.setAttribute('stroke-width',0.22);
+    g.appendChild(l);
+    svg.appendChild(g);
+  }
+
+  // мебель
+  for(const f of SCENE.furniture){
+    const g = document.createElementNS(svg.namespaceURI,'g');
+    g.setAttribute('transform',
+      `translate(${f.center[0]},${f.center[1]}) rotate(${f.rotation})`);
+    g.dataset.id = f.id;
+    g.style.cursor = 'grab';
+    const r = document.createElementNS(svg.namespaceURI,'rect');
+    r.setAttribute('x', -f.width/2); r.setAttribute('y', -f.depth/2);
+    r.setAttribute('width', f.width); r.setAttribute('height', f.depth);
+    r.setAttribute('rx', Math.min(f.width,f.depth)*0.18);
+    r.setAttribute('fill', f.color);
+    r.setAttribute('stroke', f.id===SELECTED ? '#2ec4b6' : '#00000033');
+    r.setAttribute('stroke-width', f.id===SELECTED ? 0.12 : 0.03);
+    g.appendChild(r);
+    g.addEventListener('pointerdown', e => startDrag(e, f, g));
+    svg.appendChild(g);
+  }
+
+  stage.appendChild(svg);
+  svg.addEventListener('pointerdown', e => {
+    if(e.target === svg || e.target.tagName === 'polygon'){
+      SELECTED = null; renderSel(); render2d();
+    }
+  });
+}
+
+function toModel(svg, evt){
+  const pt = svg.createSVGPoint();
+  pt.x = evt.clientX; pt.y = evt.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  return [p.x, p.y];
+}
+
+let drag = null;
+function startDrag(evt, f, g){
+  evt.stopPropagation();
+  const svg = g.ownerSVGElement;
+  const [mx,my] = toModel(svg, evt);
+  drag = {f, g, svg, dx: mx - f.center[0], dy: my - f.center[1], moved:false};
+  SELECTED = f.id; renderSel();
+  g.setPointerCapture(evt.pointerId);
+  g.style.cursor = 'grabbing';
+  g.addEventListener('pointermove', onDrag);
+  g.addEventListener('pointerup', endDrag);
+}
+
+function onDrag(evt){
+  if(!drag) return;
+  const [mx,my] = toModel(drag.svg, evt);
+  const x = mx - drag.dx, y = my - drag.dy;
+  drag.g.setAttribute('transform',
+    `translate(${x},${y}) rotate(${drag.f.rotation})`);
+  drag.f.center = [x,y];
+  drag.moved = true;
+}
+
+async function endDrag(evt){
+  if(!drag) return;
+  const g = drag.g, f = drag.f, moved = drag.moved;
+  g.removeEventListener('pointermove', onDrag);
+  g.removeEventListener('pointerup', endDrag);
+  g.style.cursor = 'grab';
+  drag = null;
+  if(!moved) return;
+  try{
+    const res = await api(`/api/projects/${PROJECT}/furniture/${f.id}`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({center: f.center})});
+    SCENE = res.scene; render2d();
+  }catch(e){ log('err','не сохранилось', String(e.message||e)); }
+}
+
+/* ---------------- панель мебели ---------------- */
+
+function buildPalette(){
+  const box = $('#palette');
+  box.innerHTML = '';
+  for(const [kind,label] of PALETTE){
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = () => addFurniture(kind);
+    box.appendChild(b);
+  }
+}
+
+async function addFurniture(kind){
+  if(!PROJECT){ log('warn','сначала план','загрузите план квартиры'); return; }
+  const [w,d] = SIZES[kind] || [1,1];
+  const b = bounds();
+  const c = [(b.x0+b.x1)/2, (b.y0+b.y1)/2 + (Math.random()-0.5)*0.6];
+  try{
+    const res = await api(`/api/projects/${PROJECT}/furniture`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({kind, center:c, width:w, depth:d})});
+    SCENE = res.scene; SELECTED = res.id; render2d(); renderSel();
+    $('#badgeRooms').textContent =
+      `${SCENE.rooms.length} пом. · ${SCENE.furniture.length} предм.`;
+    log('ok','добавлено', `${kind} → ${res.room_id ? 'помещение определено' : 'вне помещения'}`);
+  }catch(e){ log('err','ошибка', String(e.message||e)); }
+}
+
+function renderSel(){
+  const f = SCENE?.furniture.find(x => x.id === SELECTED);
+  $('#selInfo').innerHTML = f
+    ? `<b>${esc(f.kind)}</b> · ${f.width}×${f.depth} м<br>
+       <span class="muted">центр ${f.center[0].toFixed(2)}, ${f.center[1].toFixed(2)}
+       · поворот ${f.rotation}°</span>`
+    : '<span class="muted">ничего не выбрано</span>';
+}
+
+async function rotateSel(){
+  const f = SCENE?.furniture.find(x => x.id === SELECTED);
+  if(!f) return;
+  try{
+    const res = await api(`/api/projects/${PROJECT}/furniture/${f.id}`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({rotation: (f.rotation + 90) % 360})});
+    SCENE = res.scene; render2d(); renderSel();
+    if(VIEW==='3d') render3d();
+  }catch(e){ log('err','ошибка', String(e.message||e)); }
+}
+
+async function deleteSel(){
+  if(!SELECTED) return;
+  try{
+    const res = await api(`/api/projects/${PROJECT}/furniture/${SELECTED}`,
+      {method:'DELETE'});
+    SCENE = res.scene; SELECTED = null; render2d(); renderSel();
+    $('#badgeRooms').textContent =
+      `${SCENE.rooms.length} пом. · ${SCENE.furniture.length} предм.`;
+  }catch(e){ log('err','ошибка', String(e.message||e)); }
+}
+
+document.addEventListener('keydown', e => {
+  if(e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+  if(e.key === 'r' || e.key === 'R') rotateSel();
+  if(e.key === 'Delete' || e.key === 'Backspace') deleteSel();
+});
+
+/* ---------------- 3D ---------------- */
+
+function setView(v){
+  VIEW = v;
+  $('#tab2d').classList.toggle('on', v==='2d');
+  $('#tab3d').classList.toggle('on', v==='3d');
+  $('#three').style.display = v==='3d' ? 'block' : 'none';
+  const svg = $('#stage svg');
+  if(svg) svg.style.display = v==='2d' ? 'block' : 'none';
+  if(v === '3d') init3d();
+}
+
+async function init3d(){
+  if(!three){
+    three = await import('three');
+    const mod = await import('/static/OrbitControls.js');
+    threeState = {OrbitControls: mod.OrbitControls};
+  }
+  render3d();
+}
+
+function render3d(){
+  if(!SCENE) return;
+  const box = $('#three');
+  const W = box.clientWidth || 800, H = box.clientHeight || 600;
+  let renderer = box.__renderer;
+  if(!renderer){
+    renderer = new three.WebGLRenderer({antialias:true});
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(W, H);
+    box.appendChild(renderer.domElement);
+    box.__renderer = renderer;
+    addEventListener('resize', () => {
+      if(VIEW !== '3d') return;
+      renderer.setSize(box.clientWidth, box.clientHeight);
+      if(box.__camera){
+        box.__camera.aspect = box.clientWidth/box.clientHeight;
+        box.__camera.updateProjectionMatrix();
+      }
+    });
+  }
+  renderer.setSize(W, H);
+
+  const scene = new three.Scene();
+  scene.background = new three.Color(0x0f1115);
+
+  let x0=1e9,z0=1e9,x1=-1e9,z1=-1e9;
+  const acc = (x,z) => { x0=Math.min(x0,x); z0=Math.min(z0,z);
+                          x1=Math.max(x1,x); z1=Math.max(z1,z); };
+  for(const w of SCENE.walls){ acc(w.start[0],w.start[1]); acc(w.end[0],w.end[1]); }
+  if(x0>x1){ x0=z0=0; x1=z1=10; }
+  const cx = (x0+x1)/2, cz = (z0+z1)/2;
+  const span = Math.max(x1-x0, z1-z0, 3);
+
+  // полы
+  for(const r of SCENE.rooms){
+    const verts = [];
+    for(const f of r.faces){
+      for(const i of f) verts.push(...r.vertices[i]);
+    }
+    const geo = new three.BufferGeometry();
+    geo.setAttribute('position', new three.Float32BufferAttribute(verts, 3));
+    geo.computeVertexNormals();
+    const mat = new three.MeshStandardMaterial({color:0xd9d2c6, side:three.DoubleSide,
+      roughness:0.95});
+    scene.add(new three.Mesh(geo, mat));
+  }
+
+  // стены
+  for(const w of SCENE.walls){
+    const h = w.height;
+    const geo = new three.BoxGeometry(w.length, h, Math.max(0.08, w.thickness));
+    const mat = new three.MeshStandardMaterial({
+      color: w.kind==='glass' ? 0x9fd8f5 : 0xcfc9bf,
+      transparent: w.kind==='glass', opacity: w.kind==='glass' ? 0.35 : 1,
+      roughness: 0.9});
+    const m = new three.Mesh(geo, mat);
+    m.position.set((w.start[0]+w.end[0])/2, h/2, (w.start[1]+w.end[1])/2);
+    m.rotation.y = -w.angle * Math.PI/180;
+    scene.add(m);
+  }
+
+  // мебель
+  for(const f of SCENE.furniture){
+    const geo = new three.BoxGeometry(f.width, f.height, f.depth);
+    const col = new three.Color(f.color || '#b8b0a4');
+    const mat = new three.MeshStandardMaterial({color: col, roughness:0.75});
+    const m = new three.Mesh(geo, mat);
+    m.position.set(f.center[0], f.height/2, f.center[1]);
+    m.rotation.y = -f.rotation * Math.PI/180;
+    scene.add(m);
+  }
+
+  scene.add(new three.HemisphereLight(0xffffff, 0x444444, 1.15));
+  const dir = new three.DirectionalLight(0xffffff, 1.5);
+  dir.position.set(cx - span, span*1.6, cz - span);
+  scene.add(dir);
+  const dir2 = new three.DirectionalLight(0xffffff, 0.5);
+  dir2.position.set(cx + span, span, cz + span);
+  scene.add(dir2);
+
+  const camera = new three.PerspectiveCamera(50, W/H, 0.1, 500);
+  camera.position.set(cx - span*0.9, span*0.95, cz + span*1.05);
+  camera.lookAt(cx, 0, cz);
+  box.__camera = camera;
+
+  if(box.__controls) box.__controls.dispose();
+  const controls = new threeState.OrbitControls(camera, renderer.domElement);
+  controls.target.set(cx, 0, cz);
+  controls.enableDamping = true;
+  controls.update();
+  box.__controls = controls;
+
+  const loop = () => {
+    if(VIEW !== '3d') return;
+    requestAnimationFrame(loop);
+    controls.update();
+    renderer.render(scene, camera);
+  };
+  loop();
+}
+
+/* ---------------- команды ---------------- */
+
+async function runCmd(apply){
+  const text = $('#cmd').value.trim();
+  if(!text || !PROJECT) return;
+  try{
+    const res = await api(`/api/projects/${PROJECT}/command`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text, apply})});
+    if(!apply){
+      log('', 'разбор', `<pre style="white-space:pre-wrap;margin:0">${
+        esc(JSON.stringify(res.parsed, null, 2))}</pre>`);
+      return;
+    }
+    const lines = [...(res.summary||[])];
+    log('ok','применено', lines.join('<br>') || 'без изменений');
+    (res.warnings||[]).forEach(w => log('warn','внимание', esc(w)));
+    (res.clarifications||[]).forEach(c => log('warn','уточнение', esc(c)));
+    await reloadAll();
+  }catch(e){ log('err','ошибка', esc(String(e.message||e))); }
 }
 
 async function revert(id){
   try{
     await api(`/api/projects/${PROJECT}/revert/${id}`, {method:'POST'});
-    log('ok', 'откат', 'восстановлено состояние до этой правки');
-    await loadRevs(); await draw();
-  }catch(e){ log('err', 'ошибка', e.message); }
+    log('ok','откат','восстановлено состояние до этой правки');
+    await reloadAll();
+  }catch(e){ log('err','ошибка', esc(String(e.message||e))); }
 }
 
-async function loadProject(){ await draw(); await loadRevs(); }
-boot();
+/* ---------------- drag&drop файла ---------------- */
+
+const stage = $('#stage');
+stage.addEventListener('dragover', e => { e.preventDefault(); });
+stage.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files?.[0];
+  if(f) uploadFile(f);
+});
+
+/* ---------------- старт ---------------- */
+
+buildPalette();
+await reloadAll();
+if(SCENE && SCENE.rooms.length) $('#drop').classList.add('hide');
+
+window.setView = setView; window.runCmd = runCmd; window.pickFile = pickFile;
+window.uploadFile = uploadFile; window.rotateSel = rotateSel;
+window.deleteSel = deleteSel; window.revert = revert;
+window.reloadAll = reloadAll; window.addFurniture = addFurniture;
 </script>
 </body>
 </html>

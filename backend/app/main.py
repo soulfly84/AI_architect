@@ -11,8 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
-from . import commands, export, geometry, moves, render2d, storage
-from .models import Project
+from . import (commands, export, geometry, moves, planparse, render2d,
+               storage, view3d, webui)
+from .models import Furniture, Project
 
 app = FastAPI(title="Interior AI", version="0.1.0",
               description="MVP: планировка → правки текстом → 3D")
@@ -211,18 +212,174 @@ def duplicate(project_id: str, name: str | None = None):
 
 
 @app.post("/api/projects/{project_id}/upload")
-async def upload(project_id: str, file: UploadFile = File(...)):
-    """Загрузка исходного плана. Распознавание — отдельный следующий шаг."""
+async def upload(project_id: str, file: UploadFile = File(...),
+                 plan_width_m: float | None = None,
+                 replace: bool = True):
+    """Загрузить план картинкой или PDF, распознать стены и помещения.
+
+    plan_width_m — реальная ширина плана в метрах: нужна для правильного
+    масштаба. Без неё ширина принимается за 10 м, и все размеры будут
+    условными (геометрия при этом правильная).
+    """
     storage.ensure_dirs()
+    raw = await file.read()
+    try:
+        img = planparse.load_image(raw, file.filename or "plan")
+        parsed, report = planparse.build_project(
+            img, name=Path(file.filename or "plan").stem or "Загруженный план",
+            plan_width_m=plan_width_m)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", file.filename or "plan")
     dest = storage.UPLOADS / f"{project_id}_{safe}"
-    dest.write_bytes(await file.read())
+    dest.write_bytes(raw)
+
     p = _load(project_id)
+    if replace:
+        p.rooms = parsed.rooms
+        p.walls = parsed.walls
+        p.doors = parsed.doors
+        p.windows = []
+        p.furniture = []
+        p.meta.name = parsed.meta.name or p.meta.name
+    else:
+        p.rooms += parsed.rooms
+        p.walls += parsed.walls
+        p.doors += parsed.doors
     p.meta.source_image = str(dest.relative_to(storage.DATA_DIR))
+    p.meta.scale_px_per_m = parsed.meta.scale_px_per_m
     storage.save(p)
-    return {"saved": p.meta.source_image}
+
+    return {"saved": p.meta.source_image, "report": report,
+            "project_id": p.project_id, "svg": render2d.render_svg(p),
+            "scene": view3d.scene(p),
+            "validation": geometry.validate(p)}
+
+
+@app.post("/api/upload-plan")
+async def upload_plan(file: UploadFile = File(...),
+                      plan_width_m: float | None = None,
+                      name: str | None = None):
+    """Загрузить план и сразу создать из него новый проект."""
+    storage.ensure_dirs()
+    raw = await file.read()
+    try:
+        img = planparse.load_image(raw, file.filename or "plan")
+        parsed, report = planparse.build_project(
+            img, name=name or Path(file.filename or "plan").stem
+            or "Загруженный план", plan_width_m=plan_width_m)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    storage.save(parsed)
+    return {"project_id": parsed.project_id, "report": report,
+            "svg": render2d.render_svg(parsed),
+            "scene": view3d.scene(parsed),
+            "validation": geometry.validate(parsed)}
+
+
+class FurnitureIn(BaseModel):
+    kind: str
+    center: list[float]
+    width: float
+    depth: float
+    height: float | None = None
+    rotation: float = 0.0
+    color: str = "#b8b0a4"
+    room_id: str | None = None
+    seats: int | None = None
+    name: str = ""
+
+
+class FurniturePatch(BaseModel):
+    center: list[float] | None = None
+    rotation: float | None = None
+    width: float | None = None
+    depth: float | None = None
+    color: str | None = None
+    room_id: str | None = None
+
+
+def _furniture_reply(p: Project) -> dict:
+    return {"scene": view3d.scene(p), "svg": render2d.render_svg(p),
+            "validation": geometry.validate(p)}
+
+
+@app.post("/api/projects/{project_id}/furniture")
+def add_furniture(project_id: str, body: FurnitureIn):
+    """Добавить мебель. Помещение и высота определяются автоматически."""
+    p = _load(project_id)
+    if body.width <= 0 or body.depth <= 0:
+        raise HTTPException(400, "Ширина и глубина должны быть больше нуля")
+    room = p.room(body.room_id) if body.room_id else None
+    if room is None:
+        room = view3d.room_for_point(p, body.center[0], body.center[1])
+    height = body.height or view3d.FURNITURE_HEIGHTS.get(body.kind, 0.8)
+    item = Furniture(kind=body.kind, name=body.name, center=body.center,
+                     width=round(body.width, 3), depth=round(body.depth, 3),
+                     height=height, rotation=body.rotation, color=body.color,
+                     room_id=room.id if room else None, seats=body.seats)
+    before = p.model_copy(deep=True)
+    p.furniture.append(item)
+    storage.snapshot(before, p, f"добавлена мебель {item.kind}", [item.id])
+    storage.save(p)
+    return {"id": item.id, "room_id": item.room_id, **_furniture_reply(p)}
+
+
+@app.patch("/api/projects/{project_id}/furniture/{item_id}")
+def patch_furniture(project_id: str, item_id: str, body: FurniturePatch):
+    """Переместить или повернуть мебель — для перетаскивания мышью."""
+    p = _load(project_id)
+    item = next((f for f in p.furniture if f.id == item_id), None)
+    if item is None:
+        raise HTTPException(404, "Мебель не найдена")
+    before = p.model_copy(deep=True)
+    if body.center is not None:
+        item.center = [round(body.center[0], 3), round(body.center[1], 3)]
+        room = view3d.room_for_point(p, *item.center)
+        if room is not None:
+            item.room_id = room.id
+    if body.rotation is not None:
+        item.rotation = float(body.rotation) % 360
+    if body.width is not None and body.width > 0:
+        item.width = round(body.width, 3)
+    if body.depth is not None and body.depth > 0:
+        item.depth = round(body.depth, 3)
+    if body.color:
+        item.color = body.color
+    if body.room_id is not None:
+        item.room_id = body.room_id
+    storage.snapshot(before, p, "правка мебели", [item.id])
+    storage.save(p)
+    return {"id": item.id, **_furniture_reply(p)}
+
+
+@app.delete("/api/projects/{project_id}/furniture/{item_id}")
+def delete_furniture(project_id: str, item_id: str):
+    p = _load(project_id)
+    before = p.model_copy(deep=True)
+    found = [f for f in p.furniture if f.id == item_id]
+    if not found:
+        raise HTTPException(404, "Мебель не найдена")
+    p.furniture = [f for f in p.furniture if f.id != item_id]
+    storage.snapshot(before, p, "удалена мебель", [item_id])
+    storage.save(p)
+    return _furniture_reply(p)
+
+
+@app.get("/api/projects/{project_id}/scene")
+def scene(project_id: str):
+    """Данные для 3D-просмотра."""
+    p = _load(project_id)
+    return {"scene": view3d.scene(p), "meta": p.meta.model_dump()}
 
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (WEB / "index.html").read_text(encoding="utf-8")
+    return webui.index()
+
+
+@app.get("/static/{rel_path:path}")
+def static_file(rel_path: str):
+    """three.js и прочая статика локально: внешний CDN не всегда доступен."""
+    return webui.static(rel_path)

@@ -76,7 +76,7 @@ class Furniture(BaseModel):
     width: float
     depth: float
     rotation: float = 0.0  # градусы, по часовой стрелке
-    height: float = 0.8
+    height: float = 0.0  # 0 — не задана: берётся типовая для вида
     color: str = "#b8b0a4"
     seats: Optional[int] = None
     marked: Optional[str] = None
