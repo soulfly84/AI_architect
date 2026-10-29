@@ -25,7 +25,13 @@ def index() -> HTMLResponse:
     path = WEB / "index.html"
     if not path.exists():
         raise HTTPException(500, "Интерфейс не найден на сервере")
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+    return HTMLResponse(
+        path.read_text(encoding="utf-8"),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
 
 
 def static(rel_path: str) -> FileResponse:

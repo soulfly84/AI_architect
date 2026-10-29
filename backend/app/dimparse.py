@@ -160,12 +160,46 @@ def _layout(rooms: list[RoomBox]) -> None:
     """
     if not rooms:
         return
+    _resolve_overlaps(rooms)
     min_x = min(r.x0 for r in rooms)
     max_y = max(r.y1 for r in rooms)
     for r in rooms:
         r.cx -= min_x
         r.cy = max_y - r.cy
 
+
+
+
+def _resolve_overlaps(rooms: list[RoomBox], iterations: int = 80) -> None:
+    """Раздвинуть пересекающиеся комнаты, не меняя их площадь.
+
+    Модель иногда кладёт две комнаты поверх друг друга. Размеры комнат уже
+    пересчитаны по подписанной площади, поэтому менять w/h нельзя. Разрешаем
+    только сдвиги центров. Сдвигаем по оси меньшего перекрытия: это минимально
+    меняет общий силуэт плана.
+    """
+    gap = 0.03
+    for _ in range(iterations):
+        moved = False
+        for i, a in enumerate(rooms):
+            for b in rooms[i + 1:]:
+                ox = min(a.x1, b.x1) - max(a.x0, b.x0)
+                oy = min(a.y1, b.y1) - max(a.y0, b.y0)
+                if ox <= gap or oy <= gap:
+                    continue
+                moved = True
+                if ox <= oy:
+                    shift = ox / 2 + gap
+                    sign = 1 if a.cx >= b.cx else -1
+                    a.cx += sign * shift
+                    b.cx -= sign * shift
+                else:
+                    shift = oy / 2 + gap
+                    sign = 1 if a.cy >= b.cy else -1
+                    a.cy += sign * shift
+                    b.cy -= sign * shift
+        if not moved:
+            break
 
 
 

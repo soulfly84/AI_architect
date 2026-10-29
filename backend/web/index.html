@@ -288,7 +288,11 @@ function render2d(){
 
   // помещения
   for(const r of SCENE.rooms){
-    const pts = r.vertices.map(v => `${v[0]},${v[2]}`).join(' ');
+    // r.vertices[0] — центр полигона для 3D-триангуляции.
+    // В 2D его рисовать нельзя: получится самопересекающийся полигон
+    // и чёрный треугольник внутри комнаты.
+    const outline = r.vertices.slice(1);
+    const pts = outline.map(v => `${v[0]},${v[2]}`).join(' ');
     const poly = document.createElementNS(svg.namespaceURI,'polygon');
     poly.setAttribute('points', pts);
     poly.setAttribute('fill','#e9e4dc');
