@@ -244,6 +244,15 @@ def _recognize_plan(raw: bytes, filename: str, name: str,
         raise HTTPException(400, message) from exc
 
     report["engine"] = "pixels"
+    # формат отчёта как у модели: интерфейс показывает комнаты одинаково
+    from shapely.geometry import Polygon as _Poly
+    report.setdefault("details", [
+        {"name": r.name.replace("Помещение", "").strip() or "—",
+         "area_m2": round(_Poly(r.polygon).area, 1),
+         "size": "", "ok": True, "note": ""}
+        for r in project.rooms])
+    report.setdefault("total_area_m2", round(sum(
+        _Poly(r.polygon).area for r in project.rooms), 1))
     if vision_error:
         report.setdefault("warnings", []).insert(
             0, f"Модель недоступна ({vision_error}), разбор по картинке. "
