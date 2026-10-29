@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
-from . import (commands, export, geometry, moves, planparse, render2d,
-               storage, view3d, webui)
+from . import (commands, dimparse, export, geometry, moves, planparse,
+               render2d, storage, view3d, visionplan, webui)
 from .models import Furniture, Project
 
 app = FastAPI(title="Interior AI", version="0.1.0",
@@ -211,25 +211,66 @@ def duplicate(project_id: str, name: str | None = None):
     return {"project_id": p.project_id, "name": p.meta.name}
 
 
+def _recognize_plan(raw: bytes, filename: str, name: str,
+                    plan_width_m: float | None,
+                    engine: str) -> tuple[Project, dict]:
+    """Распознать план. engine: auto | vision | pixels.
+
+    auto — сначала модель (точные площади из подписей), при её отказе
+    пиксельный разбор (работает без ключа и интернета).
+    """
+    img = planparse.load_image(raw, filename)
+    engine = (engine or "auto").lower()
+
+    if engine in ("auto", "vision"):
+        try:
+            project, report = visionplan.recognize(img, name=name)
+            report["engine"] = "vision"
+            return project, report
+        except visionplan.PlanRecognitionError as exc:
+            if engine == "vision":
+                raise HTTPException(400, str(exc)) from exc
+            vision_error = str(exc)
+    else:
+        vision_error = ""
+
+    try:
+        project, report = planparse.build_project(
+            img, name=name, plan_width_m=plan_width_m)
+    except ValueError as exc:
+        message = str(exc)
+        if vision_error:
+            message += f" Модель тоже не справилась: {vision_error}"
+        raise HTTPException(400, message) from exc
+
+    report["engine"] = "pixels"
+    if vision_error:
+        report.setdefault("warnings", []).insert(
+            0, f"Модель недоступна ({vision_error}), разбор по картинке. "
+               "Площади при этом приблизительные.")
+    return project, report
+
+
 @app.post("/api/projects/{project_id}/upload")
 async def upload(project_id: str, file: UploadFile = File(...),
                  plan_width_m: float | None = None,
-                 replace: bool = True):
-    """Загрузить план картинкой или PDF, распознать стены и помещения.
+                 replace: bool = True,
+                 engine: str = "auto"):
+    """Загрузить план картинкой или PDF и распознать помещения.
 
-    plan_width_m — реальная ширина плана в метрах: нужна для правильного
-    масштаба. Без неё ширина принимается за 10 м, и все размеры будут
-    условными (геометрия при этом правильная).
+    engine: auto (модель, при сбое пиксели) | vision | pixels.
+    plan_width_m нужен только пиксельному разбору: модель берёт масштаб
+    из подписанных площадей.
     """
     storage.ensure_dirs()
     raw = await file.read()
-    try:
-        img = planparse.load_image(raw, file.filename or "plan")
-        parsed, report = planparse.build_project(
-            img, name=Path(file.filename or "plan").stem or "Загруженный план",
-            plan_width_m=plan_width_m)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
+    if not raw:
+        raise HTTPException(400, "Файл пустой")
+
+    parsed, report = _recognize_plan(
+        raw, file.filename or "plan",
+        Path(file.filename or "plan").stem or "Загруженный план",
+        plan_width_m, engine)
 
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", file.filename or "plan")
     dest = storage.UPLOADS / f"{project_id}_{safe}"
@@ -260,22 +301,39 @@ async def upload(project_id: str, file: UploadFile = File(...),
 @app.post("/api/upload-plan")
 async def upload_plan(file: UploadFile = File(...),
                       plan_width_m: float | None = None,
-                      name: str | None = None):
+                      name: str | None = None,
+                      engine: str = "auto"):
     """Загрузить план и сразу создать из него новый проект."""
     storage.ensure_dirs()
     raw = await file.read()
-    try:
-        img = planparse.load_image(raw, file.filename or "plan")
-        parsed, report = planparse.build_project(
-            img, name=name or Path(file.filename or "plan").stem
-            or "Загруженный план", plan_width_m=plan_width_m)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
+    if not raw:
+        raise HTTPException(400, "Файл пустой")
+
+    parsed, report = _recognize_plan(
+        raw, file.filename or "plan",
+        name or Path(file.filename or "plan").stem or "Загруженный план",
+        plan_width_m, engine)
+
     storage.save(parsed)
     return {"project_id": parsed.project_id, "report": report,
             "svg": render2d.render_svg(parsed),
             "scene": view3d.scene(parsed),
             "validation": geometry.validate(parsed)}
+
+
+@app.get("/api/plan/engines")
+def plan_engines():
+    """Какие способы распознавания доступны на этой установке."""
+    key = os.environ.get("PLAN_API_KEY")
+    key_file = Path.home() / ".vsegpt_key"
+    has_key = bool(key) or key_file.exists()
+    return {
+        "vision": {"available": has_key,
+                   "model": os.environ.get("PLAN_MODEL",
+                                           visionplan.DEFAULT_MODEL)},
+        "pixels": {"available": True},
+        "default": "auto" if has_key else "pixels",
+    }
 
 
 class FurnitureIn(BaseModel):

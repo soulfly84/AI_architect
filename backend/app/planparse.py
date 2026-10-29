@@ -1,14 +1,15 @@
 """Распознавание плана квартиры из картинки или PDF.
 
-Принцип «тёмное = стена»:
-1. файл приводится к картинке (PDF — через pdftoppm);
-2. длинные тёмные горизонтальные и вертикальные полосы — это стены;
-3. светлые связные области, не касающиеся края картинки, — помещения;
-4. разрывы в стене шириной примерно с дверь — дверные проёмы; стена в этом
-   месте разрезается на две, между ними ставится дверь.
+Работает и с чёрными чертежами, и с серыми сканами БТИ:
+1. яркость сравнивается с локальным фоном, поэтому серые линии тоже видны;
+2. стены — длинные горизонтальные и вертикальные полосы (короткие штрихи,
+   цифры и размеры отбрасываются по длине);
+3. помещения — замкнутые светлые области внутри контура здания; области,
+   касающиеся края картинки или слишком маленькие, не берутся;
+4. проёмы — разрывы в стенах шириной с дверь.
 
-Результат — обычный Project: дальше с ним работают те же правила, экспорт
-в DXF и 3D-модель.
+На выходе — обычный Project, с которым работают правила, экспорт и 3D.
+Если план не распознан, поднимается ValueError с понятной причиной.
 """
 from __future__ import annotations
 
@@ -19,16 +20,23 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from PIL import Image, ImageDraw, ImageOps
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
 
 from .models import Door, Project, ProjectMeta, Room, Wall
 
-MAX_SIDE = 1500          # больше не нужно, память и время экономятся
-WALL_DARKNESS = 128      # пиксель темнее этого — часть стены
-MIN_WALL_PX = 35         # короче этого не стена, а штриховка или мебель
+MAX_SIDE = 1500           # длинная сторона после уменьшения, px
+BG_WINDOW = 31            # окно локального фона, px
+DARK_DELTA = 28           # на сколько пиксель темнее фона, чтобы быть линией
+MIN_LINE_PX = 40          # минимальная длина стены, px
+CLOSE_PX = 5              # закрытие мелких разрывов в линиях, px
+MIN_ROOM_M2 = 1.0         # меньшие области — не помещения
 DEFAULT_PLAN_WIDTH_M = 10.0
+MIN_WALL_THICK_PX = 3     # тоньше — это размерные линии и штриховка, не стена
+MAX_WALL_THICK_PX = 40    # толще этого — не стена, а текст или заливка
+MERGE_GAP_PX = 14         # куски одной стены ближе этого склеиваем
 
 
 # --------------------------------------------------------------------------
@@ -74,181 +82,128 @@ def load_image(data: bytes, filename: str) -> Image.Image:
     return img
 
 
-def wall_mask(img: Image.Image) -> np.ndarray:
-    """True там, где пиксель достаточно тёмный, чтобы быть стеной."""
-    gray = np.asarray(img.convert("L"), dtype=np.uint8)
-    return gray < WALL_DARKNESS
-
-
 # --------------------------------------------------------------------------
-# стены
+# маска линий
 # --------------------------------------------------------------------------
 
 
-def _row_runs(row: np.ndarray, min_len: int = 1) -> list[tuple[int, int]]:
-    """Непрерывные отрезки True в строке: [(начало, конец_включительно)]."""
-    padded = np.concatenate(([0], row.astype(np.int8), [0]))
-    idx = np.flatnonzero(np.diff(padded))
-    return [(int(a), int(b) - 1) for a, b in zip(idx[0::2], idx[1::2])
+def dark_mask(img: Image.Image) -> np.ndarray:
+    """True там, где пиксель заметно темнее локального фона."""
+    a = np.asarray(img.convert("L"), dtype=np.float32)
+    p = np.pad(a, BG_WINDOW // 2, mode="edge")
+    bg = sliding_window_view(p, (BG_WINDOW, BG_WINDOW)).mean(axis=(2, 3))
+    return (bg - a) > DARK_DELTA
+
+
+def _runs(row: np.ndarray, min_len: int) -> list[tuple[int, int]]:
+    """Отрезки True длиной не меньше min_len: [(начало, конец_не_включая)]."""
+    pad = np.concatenate(([0], row.astype(np.int8), [0]))
+    idx = np.flatnonzero(np.diff(pad))
+    return [(int(a), int(b)) for a, b in zip(idx[0::2], idx[1::2])
             if b - a >= min_len]
 
 
-def _overlap(a0: int, a1: int, b0: int, b1: int) -> float:
-    inter = min(a1, b1) - max(a0, b0)
-    if inter <= 0:
-        return 0.0
-    return inter / max(1, min(a1 - a0, b1 - b0))
+def long_lines(mask: np.ndarray, min_len: int) -> np.ndarray:
+    """Оставить только горизонтальные отрезки длиннее min_len."""
+    out = np.zeros_like(mask)
+    for y in range(mask.shape[0]):
+        for a, b in _runs(mask[y], min_len):
+            out[y, a:b] = True
+    return out
 
 
-def _segments(mask: np.ndarray, horizontal: bool) -> list[dict]:
-    """Собрать стены одного направления: длинные полосы, склеенные по толщине."""
-    m = mask if horizontal else mask.T
+def _dilate(mask: np.ndarray, k: int) -> np.ndarray:
+    if k <= 1:
+        return mask
+    p = np.pad(mask, k // 2, mode="constant")
+    return sliding_window_view(p, (k, k)).max(axis=(2, 3)).astype(bool)
+
+
+def _erode(mask: np.ndarray, k: int) -> np.ndarray:
+    if k <= 1:
+        return mask
+    p = np.pad(mask, k // 2, mode="constant", constant_values=False)
+    return sliding_window_view(p, (k, k)).min(axis=(2, 3)).astype(bool)
+
+
+def wall_lines(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Горизонтальные и вертикальные стены как маски."""
+    h = long_lines(mask, MIN_LINE_PX)
+    v = long_lines(mask.T, MIN_LINE_PX).T
+    return h, v
+
+
+# --------------------------------------------------------------------------
+# линии -> отрезки
+# --------------------------------------------------------------------------
+
+
+def _segments(lines: np.ndarray, horizontal: bool) -> list[dict]:
+    """Отрезки из маски: склеиваем соседние строки в одну стену."""
+    m = lines if horizontal else lines.T
     groups: list[dict] = []
     for i in range(m.shape[0]):
-        for a, b in _row_runs(m[i], MIN_WALL_PX):
+        for a, b in _runs(m[i], MIN_LINE_PX):
             for g in groups:
-                if i - g["last"] <= 2 and _overlap(a, b, g["a"], g["b"]) >= 0.6:
+                if i - g["last"] <= 2 and min(b, g["b"]) - max(a, g["a"]) \
+                        >= 0.6 * min(b - a, g["b"] - g["a"]):
                     g["last"] = i
                     g["starts"].append(a)
                     g["ends"].append(b)
+                    g["a"], g["b"] = int(np.median(g["starts"])), int(np.median(g["ends"]))
                     break
             else:
                 groups.append({"first": i, "last": i, "a": a, "b": b,
                                "starts": [a], "ends": [b]})
 
-    out: list[dict] = []
+    out = []
     for g in groups:
+        thick = g["last"] - g["first"] + 1
+        if thick > MAX_WALL_THICK_PX:
+            continue
         a = float(np.median(g["starts"]))
         b = float(np.median(g["ends"]))
         pos = (g["first"] + g["last"]) / 2
-        thick = float(g["last"] - g["first"] + 1)
-        if b - a < MIN_WALL_PX:
-            continue
         if horizontal:
-            out.append({"start": (a, pos), "end": (b, pos), "thickness": thick})
+            out.append({"start": (a, pos), "end": (b, pos), "thickness": float(thick)})
         else:
-            out.append({"start": (pos, a), "end": (pos, b), "thickness": thick})
+            out.append({"start": (pos, a), "end": (pos, b), "thickness": float(thick)})
     return out
-
-
-def _length(s: dict) -> float:
-    return math.hypot(s["end"][0] - s["start"][0], s["end"][1] - s["start"][1])
-
-
-def _drop_duplicates(segs: list[dict]) -> list[dict]:
-    """Убрать короткие стены внутри длинных: штриховку, мебель, двойные линии."""
-    kept: list[dict] = []
-    for s in sorted(segs, key=lambda s: -_length(s)):
-        same = False
-        for k in kept:
-            if (_overlap(int(s["start"][0]), int(s["end"][0]),
-                         int(k["start"][0]), int(k["end"][0])) > 0.85
-                    and abs(s["start"][1] - k["start"][1]) < 4):
-                same = True
-                break
-        if not same:
-            kept.append(s)
-    return kept
 
 
 def _median_thickness(segs: list[dict]) -> float:
-    return float(np.median([s["thickness"] for s in segs])) or 8.0
+    if not segs:
+        return 6.0
+    return float(np.median([s["thickness"] for s in segs]))
 
 
-def _merge_collinear(segs: list[dict], gap_max: float) -> list[dict]:
-    """Склеить стены на одной линии, между которыми нет проёма."""
-    out = list(segs)
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(out)):
-            for j in range(i + 1, len(out)):
-                a, b = out[i], out[j]
-                if abs(a["start"][1] - b["start"][1]) > 3:
-                    continue
-                left, right = ((a, b) if a["start"][0] <= b["start"][0]
-                               else (b, a))
-                gap = right["start"][0] - left["end"][0]
-                if 0 <= gap <= gap_max:
-                    out[i] = {"start": (left["start"][0], a["start"][1]),
-                              "end": (right["end"][0], a["end"][1]),
-                              "thickness": max(a["thickness"], b["thickness"])}
-                    out.pop(j)
-                    changed = True
-                    break
-            if changed:
-                break
-    return out
+def _find_gaps(segs: list[dict], horizontal: bool, thick: float) -> list[dict]:
+    """Разрывы в одной линии шириной с дверь — это проёмы."""
+    lo, hi = thick * 2.5, thick * 16
 
+    def line(s):  return s["start"][1] if horizontal else s["start"][0]
+    def span(s):  return (s["start"][0], s["end"][0]) if horizontal else (s["start"][1], s["end"][1])
 
-def _split_at_gaps(segs: list[dict], thickness: float,
-                   horizontal: bool) -> tuple[list[dict], list[dict]]:
-    """Найти проёмы в стенах одного направления.
-
-    Возвращает (стены, проёмы). Стены остаются как есть: проём и так пустое
-    место, а вот комнаты склеиваются через него — поэтому проёмы ещё и
-    «закрываются» отдельной маской при поиске помещений.
-    """
-    lo_gap = thickness * 3.0
-    hi_gap = thickness * 18.0
-
-    def line_of(s: dict) -> float:
-        return s["start"][1] if horizontal else s["start"][0]
-
-    def from_to(s: dict) -> tuple[float, float]:
-        return ((s["start"][0], s["end"][0]) if horizontal
-                else (s["start"][1], s["end"][1]))
-
-    groups: list[list[dict]] = []
-    for s in sorted(segs, key=lambda s: (round(line_of(s) / 3), from_to(s)[0])):
-        if groups and abs(line_of(groups[-1][-1]) - line_of(s)) <= 3:
-            groups[-1].append(s)
-        else:
-            groups.append([s])
-
-    walls: list[dict] = []
-    gaps: list[dict] = []
-    for group in groups:
-        group.sort(key=lambda s: from_to(s)[0])
-        walls.append(group[0])
-        for prev, cur in zip(group, group[1:]):
-            gap = from_to(cur)[0] - from_to(prev)[1]
-            if lo_gap <= gap <= hi_gap:
-                mid = (from_to(prev)[1] + from_to(cur)[0]) / 2
-                if horizontal:
-                    gaps.append({"x": mid, "y": line_of(prev), "width": gap})
-                else:
-                    gaps.append({"x": line_of(prev), "y": mid, "width": gap,
-                                 "vertical": True})
-                walls.append(cur)
-            elif -3 <= gap <= lo_gap:
-                # почти вплотную: это одна стена, склеиваем
-                walls[-1] = {
-                    "start": prev["start"], "end": cur["end"],
-                    "thickness": max(prev["thickness"], cur["thickness"])}
+    gaps = []
+    for i, s in enumerate(segs):
+        for t in segs[i + 1:]:
+            if abs(line(s) - line(t)) > 3:
+                continue
+            (a0, a1), (b0, b1) = span(s), span(t)
+            if a1 <= b0:
+                g = b0 - a1
+                mid = (a1 + b0) / 2
+            elif b1 <= a0:
+                g = a0 - b1
+                mid = (b1 + a0) / 2
             else:
-                walls.append(cur)
-    return walls, gaps
-
-
-def _closed_mask(mask: np.ndarray, gaps: list[dict], thickness: float) -> np.ndarray:
-    """Маска для поиска помещений: стены плюс закрытые дверные проёмы.
-
-    Без этого соседние комнаты считаются одной: они соединены проёмом.
-    """
-    img = Image.fromarray((mask * 255).astype(np.uint8))
-    draw = ImageDraw.Draw(img)
-    t = max(2, int(round(thickness)))
-    for gap in gaps:
-        a = gap["x"] - gap["width"] / 2
-        b = gap["x"] + gap["width"] / 2
-        if gap.get("vertical"):
-            draw.rectangle([gap["x"] - t / 2, a, gap["x"] + t / 2, b],
-                           fill=255)
-        else:
-            draw.rectangle([a, gap["y"] - t / 2, b, gap["y"] + t / 2],
-                           fill=255)
-    return np.asarray(img, dtype=np.uint8) > 127
+                continue
+            if lo <= g <= hi:
+                pos = (line(s) + line(t)) / 2
+                gaps.append({"x": mid if horizontal else pos,
+                             "y": pos if horizontal else mid,
+                             "width": g, "horizontal": horizontal})
+    return gaps
 
 
 # --------------------------------------------------------------------------
@@ -256,8 +211,8 @@ def _closed_mask(mask: np.ndarray, gaps: list[dict], thickness: float) -> np.nda
 # --------------------------------------------------------------------------
 
 
-def _label_regions(free: np.ndarray) -> dict[int, list[tuple[int, int, int]]]:
-    """Связные области без scipy: отрезки строк + объединение меток."""
+def _label(free: np.ndarray) -> tuple[dict[int, list[tuple[int, int, int]]], dict[int, int]]:
+    """Связные области по отрезкам строк (union-find, без scipy)."""
     parent: list[int] = []
 
     def find(i: int) -> int:
@@ -266,129 +221,126 @@ def _label_regions(free: np.ndarray) -> dict[int, list[tuple[int, int, int]]]:
             i = parent[i]
         return i
 
-    def union(i: int, j: int) -> None:
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[rj] = ri
-
     rows: list[list[tuple[int, int, int]]] = []
     for y in range(free.shape[0]):
         cur = []
-        for a, b in _row_runs(free[y]):
-            label = len(parent)
-            parent.append(label)
-            cur.append((a, b, label))
+        for a, b in _runs(free[y], 1):
+            lab = len(parent)
+            parent.append(lab)
+            cur.append((a, b, lab))
         rows.append(cur)
-
     for y in range(1, len(rows)):
         for a, b, lab in rows[y]:
-            for pa, pb, plab in rows[y - 1]:
-                if pa <= b and a <= pb:
-                    union(lab, plab)
-
-    roots: dict[int, list[tuple[int, int, int]]] = {}
+            for pa, pb, pl in rows[y - 1]:
+                if pa < b and a < pb:
+                    ri, rj = find(lab), find(pl)
+                    if ri != rj:
+                        parent[rj] = ri
+    regions: dict[int, list[tuple[int, int, int]]] = {}
     for y, cur in enumerate(rows):
         for a, b, lab in cur:
-            roots.setdefault(find(lab), []).append((y, a, b))
-    return roots
+            regions.setdefault(find(lab), []).append((y, a, b))
+    return regions, {}
 
 
-def _region_polygon(runs: list[tuple[int, int, int]],
-                    tolerance: float) -> Polygon | None:
-    if not runs:
-        return None
-    parts = [box(float(a), float(y), float(b) + 1, float(y) + 1)
-             for y, a, b in runs]
+def _region_poly(runs: list[tuple[int, int, int]], tol: float) -> Polygon | None:
+    parts = [box(float(a), float(y), float(b), float(y) + 1) for y, a, b in runs]
     poly = unary_union(parts).buffer(0)
     if poly.is_empty:
         return None
-    poly = poly.simplify(tolerance, preserve_topology=True)
+    poly = poly.simplify(tol, preserve_topology=True)
     if poly.geom_type != "Polygon":
         poly = max(poly.geoms, key=lambda g: g.area)
     return poly
 
 
-def _touches_border(runs: list[tuple[int, int, int]], shape: tuple[int, int]) -> bool:
+def _touches_border(runs, shape) -> bool:
     h, w = shape
-    return any(y <= 1 or y >= h - 2 or a <= 1 or b >= w - 2
-               for y, a, b in runs)
+    return any(y <= 1 or y >= h - 2 or a <= 1 or b >= w - 2 for y, a, b in runs)
 
 
 # --------------------------------------------------------------------------
-# сборка проекта
+# сборка
 # --------------------------------------------------------------------------
 
 
 def build_project(img: Image.Image, name: str = "Загруженный план",
                   plan_width_m: float | None = None) -> tuple[Project, dict]:
     """Превратить картинку плана в проект. Возвращает (проект, отчёт)."""
-    mask = wall_mask(img)
-    h, w = mask.shape
-    if not mask.any():
-        raise ValueError("На картинке нет тёмных линий. Нужен план с чёрными "
-                         "стенами на светлом фоне.")
+    dark = dark_mask(img)
+    if dark.sum() < 100:
+        raise ValueError("На картинке почти нет линий. Нужен план с "
+                         "тёмными стенами на светлом фоне.")
 
-    h_segs = _drop_duplicates(_segments(mask, True))
-    v_segs = _drop_duplicates(_segments(mask, False))
-    all_segs = h_segs + v_segs
-    if len(all_segs) < 3:
-        raise ValueError("Распознано меньше трёх стен — похоже, это не план "
-                         "или стены слишком светлые.")
+    h_lines, v_lines = wall_lines(dark)
+    h_segs = _segments(h_lines, True)
+    v_segs = _segments(v_lines, False)
+    segs = h_segs + v_segs
+    if len(segs) < 4:
+        raise ValueError(f"Распознано {len(segs)} стен — этого мало, чтобы "
+                         "построить план. Проверьте, что стены видны и "
+                         "не слишком светлые.")
 
-    thick_ref = _median_thickness(all_segs)
-    h_segs = _merge_collinear(h_segs, gap_max=thick_ref * 2)
-    v_segs = _merge_collinear(v_segs, gap_max=thick_ref * 2)
-
-    h_walls, h_gaps = _split_at_gaps(h_segs, thick_ref, horizontal=True)
-    v_walls, v_gaps = _split_at_gaps(v_segs, thick_ref, horizontal=False)
-    segs = h_walls + v_walls
+    thick = _median_thickness(segs)
+    h_gaps = _find_gaps(h_segs, True, thick)
+    v_gaps = _find_gaps(v_segs, False, thick)
     all_gaps = h_gaps + v_gaps
 
-    # масштаб
-    span_px = max((s["end"][0] - s["start"][0] for s in h_segs), default=w)
+    # масштаб: по самой длинной горизонтальной стене
+    span_px = max((abs(s["end"][0] - s["start"][0]) for s in h_segs), default=0)
+    if span_px <= 0:
+        span_px = max((abs(s["end"][0] - s["start"][0]) for s in segs), default=img.size[0])
     if plan_width_m and plan_width_m > 1:
         px_per_m = span_px / float(plan_width_m)
         scale_source = f"задана вами: ширина плана {plan_width_m:g} м"
     else:
         px_per_m = span_px / DEFAULT_PLAN_WIDTH_M
-        scale_source = (f"оценка: ширина плана принята за "
-                        f"{DEFAULT_PLAN_WIDTH_M:g} м")
-    if px_per_m <= 0:
-        px_per_m = 60.0
+        scale_source = f"оценка: ширина плана принята за {DEFAULT_PLAN_WIDTH_M:g} м"
+    px_per_m = max(px_per_m, 1.0)
+
+    # помещения: светлые области, отделённые стенами и закрытыми проёмами
+    closed = _dilate(h_lines | v_lines, CLOSE_PX)
+    closed = _close_doorways(closed, all_gaps, thick)
+    free = ~closed
+    regions, _ = _label(free)
+
+    min_area_px = MIN_ROOM_M2 * px_per_m * px_per_m
+    cand = []
+    skipped_outside = 0
+    for runs in regions.values():
+        if _touches_border(runs, free.shape):
+            skipped_outside += 1
+            continue
+        area = sum(b - a for _, a, b in runs)
+        if area < min_area_px:
+            continue
+        cand.append((area, runs))
+    if not cand:
+        raise ValueError("Не удалось найти помещения: между стенами нет "
+                         "замкнутых светлых областей. Проверьте, что стены "
+                         "сплошные и на светлом фоне.")
+
+    # внешние области (терраса, крыльцо) обычно сильно меньше внутренних,
+    # но мы не угадываем: берём всё замкнутое и сообщаем в отчёте
+    project = Project(meta=ProjectMeta(name=name))
+    project.meta.scale_px_per_m = round(px_per_m, 3)
 
     min_x = min(min(s["start"][0], s["end"][0]) for s in segs)
     max_y = max(max(s["start"][1], s["end"][1]) for s in segs)
 
     def to_m(x: float, y: float) -> tuple[float, float]:
-        return (round((x - min_x) / px_per_m, 3),
-                round((max_y - y) / px_per_m, 3))
+        return (round((x - min_x) / px_per_m, 3), round((max_y - y) / px_per_m, 3))
 
-    project = Project(meta=ProjectMeta(name=name))
-    project.meta.scale_px_per_m = round(px_per_m, 3)
-
-    # помещения: светлые области, не касающиеся края картинки
-    free = ~_closed_mask(mask, all_gaps, thick_ref)
-    min_area_px = (1.0 * px_per_m) ** 2
     rooms: list[Room] = []
-    skipped_outside = 0
-    for runs in _label_regions(free).values():
-        if _touches_border(runs, mask.shape):
-            skipped_outside += 1
-            continue
-        poly = _region_polygon(runs, tolerance=max(0.8, px_per_m * 0.015))
+    for area, runs in sorted(cand, key=lambda t: -t[0]):
+        poly = _region_poly(runs, tol=max(0.6, px_per_m * 0.02))
         if poly is None or poly.area < min_area_px:
             continue
         pts = [to_m(x, y) for x, y in poly.exterior.coords[:-1]]
-        if len(pts) < 3:
-            continue
-        rooms.append(Room(name=f"Помещение {len(rooms) + 1}", polygon=pts))
-    if not rooms:
-        raise ValueError("Не удалось найти помещения: между стенами нет "
-                         "замкнутых светлых областей. Проверьте, что план "
-                         "на белом фоне и стены на нём сплошные.")
+        if len(pts) >= 3:
+            rooms.append(Room(name=f"Помещение {len(rooms) + 1}", polygon=pts))
     project.rooms = rooms
 
-    # стены
     for s in segs:
         x1, y1 = to_m(*s["start"])
         x2, y2 = to_m(*s["end"])
@@ -399,32 +351,33 @@ def build_project(img: Image.Image, name: str = "Загруженный план
             thickness=round(max(0.06, s["thickness"] / px_per_m), 3),
             height=2.7, kind="internal"))
 
-    # двери
     for gap in all_gaps:
         gx, gy = to_m(gap["x"], gap["y"])
         width_m = round(max(0.6, min(1.3, gap["width"] / px_per_m)), 2)
+        horiz_gap = gap["horizontal"]
         best, best_d = None, 1e9
         for wall in project.walls:
-            horizontal = abs(wall.start[1] - wall.end[1]) < 0.02
-            if horizontal != (not gap.get("vertical")):
+            horiz = abs(wall.start[1] - wall.end[1]) < 0.02
+            if horiz != horiz_gap:
                 continue
-            lo = min(wall.start[0], wall.end[0]) - 0.5
-            hi = max(wall.start[0], wall.end[0]) + 0.5
-            coord = gy if horizontal else gx
-            near = min(abs(wall.start[1] - coord), abs(wall.end[1] - coord),
-                       abs(wall.start[0] - coord), abs(wall.end[0] - coord))
-            if not (lo <= gx <= hi or lo <= gy <= hi):
+            coord = gy if horiz else gx
+            along = gx if horiz else gy
+            wa = (wall.start[0], wall.end[0]) if horiz else (wall.start[1], wall.end[1])
+            if not (min(wa) - 0.5 <= along <= max(wa) + 0.5):
                 continue
-            if near < best_d:
-                best, best_d = wall, near
-        if best is None or best_d > max(0.6, width_m):
+            wc = wall.start[1] if horiz else wall.start[0]
+            d = abs(wc - coord)
+            if d < best_d:
+                best, best_d = wall, d
+        if best is None or best_d > 0.6:
             continue
-        if abs(best.start[1] - best.end[1]) < 0.02:
-            length = abs(best.end[0] - best.start[0]) or 1.0
-            t = (gx - min(best.start[0], best.end[0])) / length
+        horiz = abs(best.start[1] - best.end[1]) < 0.02
+        if horiz:
+            s0, s1 = sorted([best.start[0], best.end[0]])
+            t = (gx - s0) / max(s1 - s0, 1e-6)
         else:
-            length = abs(best.end[1] - best.start[1]) or 1.0
-            t = (gy - min(best.start[1], best.end[1])) / length
+            s0, s1 = sorted([best.start[1], best.end[1]])
+            t = (gy - s0) / max(s1 - s0, 1e-6)
         project.doors.append(Door(wall_id=best.id,
                                   t=round(min(0.95, max(0.05, t)), 3),
                                   width=width_m, swing="in", hinge="left"))
@@ -435,16 +388,30 @@ def build_project(img: Image.Image, name: str = "Загруженный план
         "doors": len(project.doors),
         "scale_px_per_m": project.meta.scale_px_per_m,
         "scale_source": scale_source,
-        "image_px": [w, h],
+        "image_px": list(img.size),
         "outside_regions_skipped": skipped_outside,
         "warnings": [
             f"Масштаб — {scale_source}. Если размеры не совпадают с реальными, "
-            f"укажите ширину плана в метрах и повторите распознавание.",
-            "Распознаются только прямые стены. Дуги, эркеры под углом и "
-            "лестницы могут быть потеряны.",
+            "укажите ширину плана в метрах и повторите распознавание.",
+            "Распознаются прямые стены. Дуги, наклонные стены и лестницы могут "
+            "потеряться.",
             "Двери находятся по разрывам в стенах и могут быть пропущены.",
-            "Мебель и подписи с исходной картинки не переносятся: расставляйте "
-            "заново командами или через панель.",
+            "Мебель и подписи с картинки не переносятся: расставляйте заново.",
         ],
     }
     return project, report
+
+
+def _close_doorways(closed: np.ndarray, gaps: list[dict], thick: float) -> np.ndarray:
+    """Закрыть проёмы, чтобы комнаты не сливались через дверь."""
+    out = closed.copy()
+    t = max(2, int(round(thick)))
+    for g in gaps:
+        x, y, w = g["x"], g["y"], g["width"]
+        if g["horizontal"]:
+            x0, x1 = int(x - w / 2), int(x + w / 2) + 1
+            out[max(0, int(y) - t // 2):int(y) + t // 2 + 1, max(0, x0):x1] = True
+        else:
+            y0, y1 = int(y - w / 2), int(y + w / 2) + 1
+            out[max(0, y0):y1, max(0, int(x) - t // 2):int(x) + t // 2 + 1] = True
+    return out

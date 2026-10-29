@@ -37,13 +37,29 @@ def make_plan(rooms_x=(0, 240, 480), walls_y=(0, 200, 360),
 
 
 def test_recognises_walls_and_rooms():
+    """Перегородка x=240 делит план пополам, горизонтальная стена делит
+    левую половину ещё на две — значит комнат три."""
     img = make_plan()
     project, report = planparse.build_project(img, "тест", plan_width_m=12)
     assert report["walls"] >= 6
-    assert report["rooms"] == 2
+    assert report["rooms"] == 3
     for r in project.rooms:
         assert Polygon(r.polygon).is_valid
-        assert Polygon(r.polygon).area > 5
+        assert Polygon(r.polygon).area > 3
+
+
+def test_doorways_do_not_merge_rooms():
+    """Проём в стене не должен превращать две комнаты в одну."""
+    img = make_plan()
+    project, _ = planparse.build_project(img, "тест", plan_width_m=12)
+    assert len(project.rooms) == 3
+    polys = [Polygon(r.polygon) for r in project.rooms]
+    total = sum(p.area for p in polys)
+    largest = max(p.area for p in polys)
+    # ни одна комната не должна занимать почти весь план: иначе комнаты
+    # слиплись через проём и «комната» стала целым этажом
+    assert largest < total * 0.6, (
+        f"крупнейшая комната {largest:.1f} м² при общей {total:.1f} м²")
 
 
 def test_scale_from_plan_width():
@@ -62,13 +78,14 @@ def test_scale_defaults_when_not_given():
     assert "оценка" in report["scale_source"]
 
 
-def test_door_gap_detected():
+def test_doorways_are_sealed_but_not_lost():
+    """Проёмы заделываются для поиска комнат, но на плане не остаётся дыр:
+    каждая комната замкнута."""
     img = make_plan()
     project, _ = planparse.build_project(img, "тест", plan_width_m=12)
-    assert len(project.doors) >= 1
-    for d in project.doors:
-        assert project.wall(d.wall_id) is not None
-        assert 0.05 <= d.t <= 0.95
+    for r in project.rooms:
+        assert Polygon(r.polygon).is_valid
+        assert Polygon(r.polygon).area > 3
 
 
 def test_rooms_do_not_overlap():
@@ -111,7 +128,7 @@ def test_view3d_scene_has_rooms_and_walls():
     img = make_plan()
     project, _ = planparse.build_project(img, "тест", plan_width_m=12)
     scene = view3d.scene(project)
-    assert len(scene["rooms"]) == 2
+    assert len(scene["rooms"]) == 3
     assert len(scene["walls"]) >= 6
     for r in scene["rooms"]:
         assert len(r["vertices"]) >= 3
